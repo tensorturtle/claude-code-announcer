@@ -1,5 +1,7 @@
 # claude-code-announcer
 
+Fully vibe coded in 10 minutes.
+
 A [Claude Code](https://claude.com/claude-code) hook for macOS + iTerm2 that **speaks a one-line summary of what Claude just finished — but only when you're not looking at it.**
 
 Stay focused on the pane where Claude is working and it stays silent. Switch to another window, tab, or split pane, and when Claude finishes you'll hear something like:
