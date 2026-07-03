@@ -1,4 +1,4 @@
-# ding-if-unfocused
+# claude-code-announcer
 
 A [Claude Code](https://claude.com/claude-code) hook for macOS + iTerm2 that **speaks a one-line summary of what Claude just finished — but only when you're not looking at it.**
 
