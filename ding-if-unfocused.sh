@@ -1,22 +1,19 @@
 #!/bin/bash
-# Claude Code Stop hook: when the terminal session Claude Code runs in is NOT
-# focused, announce via text-to-speech which session finished and a one-line
-# gist of what it did. If everything else fails, fall back to a simple ding.
+# Claude Code Stop hook: when this terminal session is NOT focused, announce
+# via text-to-speech which session finished and a one-line gist of what it did.
 #
 # "Focused" means: iTerm2 is the frontmost macOS app AND the active iTerm2
 # session's tty matches this Claude Code process's tty — so a Claude Code
 # sitting in a background tab or unfocused split pane still announces.
 #
-# Announcement text: the final assistant message is summarised into one spoken
-# sentence by a small LLM via OpenRouter (falls back to a mechanical trim).
-# Speech chain: ElevenLabs TTS -> macOS `say` -> plain ding.
+# Announcement: identifies WHICH session finished (project, branch, what the
+# session has been about — from recent user requests) with a few-word outcome,
+# written by a small LLM via OpenRouter. Speech: ElevenLabs -> `say` -> ding.
+# Keys (both optional — the hook degrades gracefully without them):
+# ~/.claude/hooks/{elevenlabs,openrouter}.key (one line each), or the
+# ELEVENLABS_API_KEY / OPENROUTER_API_KEY env vars.
 #
-# API keys (both optional — the hook degrades gracefully without them):
-#   ElevenLabs: $ELEVENLABS_API_KEY or ~/.claude/hooks/elevenlabs.key
-#   OpenRouter: $OPENROUTER_API_KEY or ~/.claude/hooks/openrouter.key
-#   (key files: just the key, one line)
-#
-# Debug: echo '{}' | DING_DEBUG=1 DING_FORCE=1 ./ding-if-unfocused.sh
+# Debug: echo '{}' | DING_DEBUG=1 DING_FORCE=1 ~/.claude/hooks/ding-if-unfocused.sh
 #   DING_DEBUG=1  print decisions to stderr
 #   DING_FORCE=1  skip the focus check (always announce)
 
@@ -28,11 +25,11 @@ VOLUME="${DING_VOLUME:-}"
 [[ -z "$VOLUME" && -r "$VOLUME_FILE" ]] && VOLUME=$(tr -d '[:space:]' < "$VOLUME_FILE")
 VOLUME="${VOLUME:-0.4}"
 ELEVEN_VOICE="21m00Tcm4TlvDq8ikWAM"   # Rachel (premade) — set your own voice ID
-ELEVEN_MODEL="eleven_flash_v2_5"      # low-latency TTS model
+ELEVEN_MODEL="eleven_flash_v2_5"      # low-latency model
 SAY_VOICE="Samantha"
 KEY_FILE="$HOME/.claude/hooks/elevenlabs.key"
 OR_KEY_FILE="$HOME/.claude/hooks/openrouter.key"
-OR_MODEL="anthropic/claude-haiku-4.5" # small fast model for writing the announcement
+OR_MODEL="anthropic/claude-haiku-4.5"  # small fast model for writing the announcement
 
 payload=$(cat 2>/dev/null)
 
@@ -80,8 +77,12 @@ cwd=$(jq -r '.cwd // empty' <<<"$payload" 2>/dev/null)
 transcript=$(jq -r '.transcript_path // empty' <<<"$payload" 2>/dev/null)
 project=$(basename "${cwd:-$PWD}")
 
-# Raw final assistant message from the transcript (input for the LLM writer)
+branch=$(git -C "${cwd:-$PWD}" branch --show-current 2>/dev/null)
+
+# Session context from the transcript: recent user requests (what this session
+# is about) plus the final assistant message (how it ended).
 last_msg=""
+user_msgs=""
 if [[ -n "$transcript" && -r "$transcript" ]]; then
   last_msg=$(tail -n 100 "$transcript" 2>/dev/null | jq -r '
       select(.type == "assistant")
@@ -90,44 +91,46 @@ if [[ -n "$transcript" && -r "$transcript" ]]; then
       | join(" ")
       | gsub("[[:space:]]+"; " ")
       | select(length > 0)' 2>/dev/null | tail -n 1)
-  last_msg=${last_msg:0:4000}
+  last_msg=${last_msg:0:800}
+  user_msgs=$(tail -n 300 "$transcript" 2>/dev/null | jq -r '
+      select(.type == "user")
+      | .message.content
+      | if type == "string" then . else (map(select(.type == "text") | .text) | join(" ")) end
+      | select(test("<system-reminder>|<local-command|<command-name>") | not)
+      | gsub("[[:space:]]+"; " ")
+      | select(length > 0)' 2>/dev/null | tail -n 4 | cut -c1-200)
 fi
 
 # Ask a small LLM via OpenRouter to write the spoken announcement.
 or_key=${OPENROUTER_API_KEY:-}
 [[ -z "$or_key" && -r "$OR_KEY_FILE" ]] && or_key=$(tr -d '[:space:]' < "$OR_KEY_FILE")
 
-summary=""
+text=""
 if [[ -n "$last_msg" && -n "$or_key" ]]; then
-  or_body=$(jq -n --arg model "$OR_MODEL" --arg msg "$last_msg" '{
+  context=$(printf 'Project: %s\nGit branch: %s\nRecent user requests:\n%s\nAssistant final message: %s' \
+      "${project//[-_]/ }" "${branch:-unknown}" "$user_msgs" "$last_msg" \
+      | sed -E 's/(sk|gh[pos]|xox[bp])[-_][A-Za-z0-9_-]{12,}/[redacted key]/g')
+  or_body=$(jq -n --arg model "$OR_MODEL" --arg ctx "$context" '{
     model: $model,
-    max_tokens: 80,
+    max_tokens: 60,
     messages: [
       { role: "system",
-        content: "You turn a coding assistant'\''s final message into a short spoken notification. One sentence, max 22 words, first person past tense (e.g. \"I fixed the login bug and the tests pass.\"). Plain speech only: no markdown, no code symbols, no file paths. Lead with the concrete outcome. If the assistant asked a question or is blocked, say what it needs instead." },
-      { role: "user", content: $msg }
+        content: "You announce to a developer running several Claude Code terminal sessions that one of them just finished. Identify the session: project name, branch if it helps, and what the session has been about, judged from the user requests. Keep the outcome to a few words at the end. One sentence, max 18 words, simple spoken language, no markdown, no code symbols, no file paths. Example: \"Your ayni health session about the voice notification hook is done and waiting for review.\"" },
+      { role: "user", content: $ctx }
     ]
   }')
-  summary=$(curl -sf --max-time 12 https://openrouter.ai/api/v1/chat/completions \
+  text=$(curl -sf --max-time 12 https://openrouter.ai/api/v1/chat/completions \
       -H "Authorization: Bearer $or_key" -H "Content-Type: application/json" \
       -d "$or_body" 2>/dev/null | jq -r '.choices[0].message.content // empty' \
       | tr '\n' ' ' | sed -E 's/^[" ]+|[" ]+$//g')
-  [[ -n "$summary" ]] && debug "summary via OpenRouter ($OR_MODEL)"
+  [[ -n "$text" ]] && debug "announcement via OpenRouter ($OR_MODEL)"
 fi
 
-# Fallback: mechanical trim of the raw message
-if [[ -z "$summary" && -n "$last_msg" ]]; then
-  debug "OpenRouter unavailable, using mechanical trim"
-  summary=$(sed -E 's/[*_`#|>]//g; s/\[([^]]*)\]\([^)]*\)/\1/g' <<<"$last_msg")
-  summary=$(sed -E 's/^((([^.!?]+)[.!?]){1,2}).*$/\1/' <<<"$summary")
-  if [[ ${#summary} -gt 280 ]]; then
-    summary="${summary:0:280}"
-    summary="${summary% *}"  # drop the trailing partial word
-  fi
+# Fallback: identify the session mechanically
+if [[ -z "$text" ]]; then
+  debug "OpenRouter unavailable, using mechanical announcement"
+  text="${project//[-_]/ } session${branch:+ on branch ${branch//[-_\/]/ }} finished."
 fi
-[[ -z "$summary" ]] && summary="finished its task."
-
-text="${project//[-_]/ } session: $summary"
 debug "announce: $text"
 
 # ---------- speak: ElevenLabs -> say -> ding ----------
@@ -147,7 +150,7 @@ if [[ -n "$eleven_key" ]]; then
     exit 0
   fi
   rm -f "$tmp"
-  debug "ElevenLabs failed, falling back to say"
+  debug "ElevenLabs failed (key lacks text_to_speech permission?), falling back to say"
 fi
 
 if say -v "$SAY_VOICE" "[[volm $VOLUME]] $text" 2>/dev/null; then

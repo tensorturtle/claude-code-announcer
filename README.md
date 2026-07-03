@@ -4,9 +4,9 @@ A [Claude Code](https://claude.com/claude-code) hook for macOS + iTerm2 that **s
 
 Stay focused on the pane where Claude is working and it stays silent. Switch to another window, tab, or split pane, and when Claude finishes you'll hear something like:
 
-> *"my project session: I fixed the login redirect bug and all tests pass."*
+> *"Your ayni health session about fixing the stream unread divider is done and ready."*
 
-The summary is written by a small LLM from Claude's actual final message, and spoken with an ElevenLabs voice. Every stage degrades gracefully: no OpenRouter key → mechanical text trim; no ElevenLabs key → macOS `say`; no audio at all → a plain Glass ding.
+Built for running several Claude Code sessions at once: the announcement leads with **which session** finished — project, branch, and what that session has been about — so you know where to switch, without a lecture on what was done. It's written by a small LLM from the session transcript and spoken with an ElevenLabs voice. Every stage degrades gracefully: no OpenRouter key → mechanical text trim; no ElevenLabs key → macOS `say`; no audio at all → a plain Glass ding.
 
 ## How it works
 
@@ -16,8 +16,8 @@ On every [`Stop` hook](https://docs.claude.com/en/docs/claude-code/hooks) event 
    - Is iTerm2 the frontmost macOS app? (`lsappinfo`, no permissions needed)
    - If so, does the active iTerm2 session's tty (AppleScript) match *this* Claude Code's tty (found by walking up the process tree)?
    - Both true → you're watching → exit silently. A Claude Code in a background tab or unfocused split pane still announces.
-2. **Builds the announcement** — extracts Claude's final message from the session transcript (`.jsonl`), and asks a small model via OpenRouter (default `anthropic/claude-haiku-4.5`) to compress it into one spoken-style sentence: first person, max 22 words, no markdown. If Claude ended by asking a question, the announcement says what it needs instead.
-3. **Speaks it** — `"<project> session: <summary>"` via ElevenLabs TTS (default model `eleven_flash_v2_5`), played with `afplay`.
+2. **Builds the announcement** — gathers session identity (project directory, git branch, the last few user requests from the session transcript, plus Claude's final message) and asks a small model via OpenRouter (default `anthropic/claude-haiku-4.5`) to write one spoken sentence, max 18 words, that names the session and its topic first and keeps the outcome to a few words. Anything that looks like an API key is redacted before the context is sent, and `<system-reminder>` blocks are filtered out.
+3. **Speaks it** — via ElevenLabs TTS (default model `eleven_flash_v2_5`), played with `afplay`.
 
 Why not the xterm focus-tracking escape sequence (`CSI ?1004h`)? That's the right tool *inside* a TUI — but a hook is a subprocess that doesn't own the terminal's input stream (Claude Code does). So the hook detects focus from the outside instead. `focus_demo.py` in this repo demonstrates the in-band approach for the curious.
 
@@ -93,7 +93,7 @@ Nothing here is load-bearing; every failure just steps down a tier:
 
 ```
 focus unknown ──────────────► stay silent (never annoy a focused user)
-OpenRouter down / no key ───► first two sentences of Claude's message
+OpenRouter down / no key ───► "<project> session on branch <branch> finished."
 ElevenLabs down / no key ───► macOS `say`
 `say` fails ────────────────► Glass ding
 ```
